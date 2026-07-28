@@ -1,0 +1,52 @@
+name: CI
+
+# Lint every PHP file and run both the pure-logic unit suite and the seeded
+# integration suite across the plugin's supported PHP range (Requires PHP: 7.2).
+# No WordPress install or database is needed — the tests stub WordPress and use
+# an in-memory data layer, so the matrix is fast and self-contained.
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.2', '7.4', '8.0', '8.1', '8.2', '8.3']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: none
+          ini-values: error_reporting=E_ALL, display_errors=On
+
+      - name: Lint all PHP files
+        run: |
+          set -e
+          find . -path ./.git -prune -o -name '*.php' -print | while read -r file; do
+            php -l "$file"
+          done
+
+      - name: Unit tests (pure logic, stubbed WordPress)
+        run: php tests/run-tests.php
+
+      - name: Integration tests (real repository, seeded in-memory DB)
+        run: php tests/integration-tests.php

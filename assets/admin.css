@@ -1,0 +1,44 @@
+.tutor-user-cleanup-fieldset {
+	margin: 1em 0;
+	padding: 12px 16px;
+	border: 1px solid #dcdcde;
+	border-left: 4px solid #2271b1;
+	background: #fff;
+	border-radius: 3px;
+}
+
+.tutor-user-cleanup-fieldset h2 {
+	margin-top: 0;
+	font-size: 1.05em;
+}
+
+.tutor-user-cleanup-fieldset .description {
+	margin: 6px 0;
+}
+
+.tutor-user-cleanup-preserve {
+	color: #1d6b3b;
+}
+
+.tutor-user-cleanup-warning {
+	color: #b32d2e;
+}
+
+.tutor-user-cleanup-preview {
+	margin-top: 10px;
+}
+
+.tutor-user-cleanup-preview table {
+	margin-top: 6px;
+}
+
+#tutor_user_cleanup_spinner.is-active {
+	visibility: visible;
+	float: none;
+	display: inline-block;
+	vertical-align: middle;
+}
+
+.tutor-user-cleanup-confirm .widefat {
+	margin: 12px 0 20px;
+}
