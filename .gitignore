@@ -1,0 +1,14 @@
+# Build output from bin/build.sh — never committed; the release workflow
+# regenerates it and attaches the zip to the GitHub Release instead.
+/build/
+/dist/
+*.zip
+
+# Not used by this plugin (no composer.json, no npm), but listed so a stray
+# local install can never be committed.
+/vendor/
+/node_modules/
+
+.DS_Store
+Thumbs.db
+*.log

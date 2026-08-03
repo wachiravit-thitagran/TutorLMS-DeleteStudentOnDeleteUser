@@ -1,0 +1,236 @@
+name: Build & Release
+
+# Releases are cut from a *tested* commit, not from whatever last landed on
+# main. The CI workflow runs first; only when it reports success for a push
+# to main does this workflow wake up, and it then builds, tags and publishes
+# the exact commit that suite ran against — github.event.workflow_run.head_sha
+# — rather than the current tip of main, which may already have moved on.
+#
+# Skip a release for a particular commit by putting [skip release] in its
+# message. Anything else pushed to main that passes the tests gets one.
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & publish
+    # Kept at one indent level so the folded scalar collapses to a single line.
+    #
+    # CI also runs for pull requests, where head_branch is the source branch
+    # and head_sha is an ephemeral merge commit — never releasable. A PR opened
+    # *from* main would otherwise slip past the branch filter, so exclude it
+    # explicitly. Push and a manual CI dispatch on main both qualify.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event != 'pull_request' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      !contains(github.event.workflow_run.head_commit.message, '[skip release]'))
+    runs-on: ubuntu-latest
+
+    env:
+      # The single source of truth for this run. Checkout, version computation,
+      # tag and release all use it, so the release can never end up attached to
+      # a different commit than the one whose tests passed.
+      RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+    steps:
+      - name: Checkout the tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Confirm the checkout
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse HEAD)
+          if [ "$head" != "$RELEASE_SHA" ]; then
+            echo "Checked out ${head} but expected ${RELEASE_SHA}; refusing to release." >&2
+            exit 1
+          fi
+          echo "Releasing ${head}"
+          git log -1 --format='%h %s'
+
+      - name: Compute next version
+        id: ver
+        run: |
+          set -euo pipefail
+          current=$(grep -iE '^\s*\*?\s*Version:' tutor-user-cleanup.php | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+          latest_tag=$(git tag --list 'v*' --sort=-v:refname | grep -oE '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 | sed 's/^v//' || true)
+          echo "header=${current:-none}  latest_tag=${latest_tag:-none}"
+
+          if [ -z "${latest_tag}" ]; then
+            # First release: the header is the version.
+            next="${current:-0.1.0}"
+          else
+            higher=$(printf '%s\n%s\n' "$current" "$latest_tag" | sort -V | tail -1)
+            if [ -n "$current" ] && [ "$higher" = "$current" ] && [ "$current" != "$latest_tag" ]; then
+              # A human bumped the header past the last tag: honour it, which is
+              # how a MINOR or MAJOR release is requested.
+              next="$current"
+            else
+              # Otherwise auto-bump the PATCH from the newest tag.
+              IFS=. read -r MA MI PA <<< "$latest_tag"
+              next="${MA}.${MI}.$((PA + 1))"
+            fi
+          fi
+
+          if ! printf '%s' "$next" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Computed version '$next' is not valid semver; aborting." >&2
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/v$next" >/dev/null; then
+            existing=$(git rev-list -n 1 "v$next")
+            if [ "$existing" != "$RELEASE_SHA" ]; then
+              echo "Tag v$next already exists at ${existing}, which is not ${RELEASE_SHA}; aborting." >&2
+              exit 1
+            fi
+          fi
+
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+          echo "Next version: $next (tag v$next)"
+
+      - name: Stamp version into plugin
+        env:
+          NEXT: ${{ steps.ver.outputs.next }}
+        run: |
+          set -euo pipefail
+
+          # TUTOR_USER_CLEANUP_MIN_TUTOR_VERSION and ..._TESTED_TUTOR_VERSION
+          # live two lines below the plugin version but mean something entirely
+          # different: the range of *Tutor LMS* releases whose data model this
+          # plugin was validated against. Stamping either of them would make the
+          # cleanup service compare a site's Tutor version against this plugin's
+          # release number and refuse (or wrongly permit) live deletion. Record
+          # them now and prove afterwards that nothing moved.
+          read_const() {
+            grep -E "'$1'" tutor-user-cleanup.php | head -1 | sed -E "s/.*'$1',[[:space:]]*'([^']*)'.*/\1/"
+          }
+          min_before=$(read_const TUTOR_USER_CLEANUP_MIN_TUTOR_VERSION)
+          tested_before=$(read_const TUTOR_USER_CLEANUP_TESTED_TUTOR_VERSION)
+          echo "Tutor LMS range before stamping: min=${min_before} tested=${tested_before}"
+
+          # Plugin header.
+          sed -i -E "s/^([[:space:]]*\*[[:space:]]*Version:[[:space:]]*).*/\1${NEXT}/" tutor-user-cleanup.php
+
+          # The runtime constant. Anchored on the full quoted constant name and
+          # on define( so it cannot reach '..._MIN_TUTOR_VERSION' or
+          # '..._TESTED_TUTOR_VERSION', neither of which contains the literal
+          # 'TUTOR_USER_CLEANUP_VERSION' between quotes.
+          sed -i -E "s/^([[:space:]]*define\([[:space:]]*'TUTOR_USER_CLEANUP_VERSION',[[:space:]]*')[^']*('[[:space:]]*\);)/\1${NEXT}\2/" tutor-user-cleanup.php
+
+          # readme.txt is what WordPress shows as the installed version. Only the
+          # Stable tag header moves; the == Changelog == entries are history.
+          sed -i -E "s/^(Stable tag:[[:space:]]*).*/\1${NEXT}/" readme.txt
+
+          # Every location must now agree, or the build is not what it claims.
+          check() {
+            local label="$1" found="$2"
+            if [ "$found" != "$NEXT" ]; then
+              echo "${label} is '${found}', expected '${NEXT}'." >&2
+              exit 1
+            fi
+            echo "  ${label}: ${found}"
+          }
+
+          echo "Stamped ${NEXT}:"
+          check 'plugin header' "$(grep -E '^[[:space:]]*\*[[:space:]]*Version:' tutor-user-cleanup.php | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+          check 'TUTOR_USER_CLEANUP_VERSION' "$(read_const TUTOR_USER_CLEANUP_VERSION)"
+          check 'readme.txt Stable tag' "$(grep -E '^Stable tag:' readme.txt | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+
+          # The Tutor LMS range constants must read exactly as they did before.
+          for pair in "TUTOR_USER_CLEANUP_MIN_TUTOR_VERSION:${min_before}" \
+                      "TUTOR_USER_CLEANUP_TESTED_TUTOR_VERSION:${tested_before}"; do
+            const="${pair%%:*}"
+            was="${pair#*:}"
+            now=$(read_const "$const")
+            if [ "$now" != "$was" ]; then
+              echo "${const} changed from '${was}' to '${now}'; the version stamp is not precise enough." >&2
+              exit 1
+            fi
+            echo "  ${const}: ${now} (unchanged)"
+          done
+
+          # Belt and braces: show the diff, and let nothing through it that is
+          # not one of the three version lines. A stray sed that clipped a
+          # neighbouring header or constant shows up here even if its new value
+          # happened to look plausible.
+          echo "Diff:"
+          git --no-pager diff -- tutor-user-cleanup.php readme.txt
+          unexpected=$(
+            git --no-pager diff -U0 -- tutor-user-cleanup.php readme.txt \
+              | grep -E '^[+-][^+-]' \
+              | grep -vE "^[+-][[:space:]]*\*[[:space:]]*Version:|^[+-][[:space:]]*define\([[:space:]]*'TUTOR_USER_CLEANUP_VERSION'|^[+-]Stable tag:" \
+              || true
+          )
+          if [ -n "$unexpected" ]; then
+            echo "These lines changed but should not have:" >&2
+            printf '%s\n' "$unexpected" >&2
+            exit 1
+          fi
+
+          # A stray sed must not be allowed to ship broken PHP.
+          if command -v php >/dev/null 2>&1; then
+            php -l tutor-user-cleanup.php
+          fi
+
+      - name: Make build script executable
+        run: chmod +x bin/build.sh
+
+      - name: Build plugin zip
+        run: bin/build.sh
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-zip
+          path: dist/*.zip
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — refreshing assets."
+            gh release upload "$TAG" dist/*.zip --clobber
+          else
+            echo "Creating release $TAG at ${RELEASE_SHA}."
+            gh release create "$TAG" dist/*.zip \
+              --target "$RELEASE_SHA" \
+              --title "$TAG" \
+              --generate-notes
+          fi
+
+      - name: Confirm the tag points at the tested commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          tagged=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq '.sha')
+          if [ "$tagged" != "$RELEASE_SHA" ]; then
+            echo "Tag ${TAG} resolves to ${tagged}, not ${RELEASE_SHA}." >&2
+            exit 1
+          fi
+          echo "${TAG} → ${tagged}"
