@@ -33,6 +33,9 @@ if ( ! defined( 'TUTOR_VERSION' ) ) {
 	define( 'TUTOR_VERSION', '4.0.1' ); // == tested version -> status 'ok'.
 }
 
+if ( ! function_exists( 'wp_cache_delete' ) ) { function wp_cache_delete( $key, $group = '' ) { return true; } }
+if ( ! function_exists( 'clean_comment_cache' ) ) { function clean_comment_cache( $ids ) {} }
+
 /**
  * Tiny in-memory database standing in for $wpdb.
  *
@@ -806,7 +809,7 @@ itc_assert_eq( 'success', $summary['result'], 'live wipe result = success' );
 // Reported counts reflect what was actually seeded.
 itc_assert_eq( 3, $summary['counts']['enrollments'], 'counts.enrollments = 3' );
 itc_assert_eq( 3, $summary['counts']['courses_reset'], 'counts.courses_reset includes pending enrollment course' );
-itc_assert_eq( array( 500, 600, 650 ), $GLOBALS['itc_tutor_utils']->reset_courses, 'progress reset runs for every enrollment status' );
+itc_assert_eq( array(), $GLOBALS['itc_tutor_utils']->reset_courses, 'progress reset never invokes broad quiz and add-on helper' );
 itc_assert_eq( 2, $summary['counts']['course_completions'], 'counts.course_completions = 2' );
 itc_assert_eq( 2, $summary['counts']['lesson_completions'], 'counts.lesson_completions = 2' );
 itc_assert_eq( 3, $summary['counts']['quiz_attempts'], 'counts.quiz_attempts = 3' );

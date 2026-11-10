@@ -18,6 +18,26 @@ require $base . '/includes/class-settings.php';
 require $base . '/includes/class-logger.php';
 require $base . '/includes/class-tutor-data-repository.php';
 require $base . '/includes/class-cleanup-service.php';
+require $base . '/includes/class-admin-ui.php';
+require $base . '/includes/class-reset-learner.php';
+
+class TUC_Test_Response extends RuntimeException {
+	public $payload;
+	public function __construct( $payload ) { $this->payload = $payload; }
+}
+function check_ajax_referer( $action, $field ) { return true; }
+function wp_send_json_error( $data, $status = null ) { throw new TUC_Test_Response( array( 'success' => false, 'data' => $data ) ); }
+function wp_send_json_success( $data ) { throw new TUC_Test_Response( array( 'success' => true, 'data' => $data ) ); }
+function wp_die( $message ) { throw new TUC_Test_Response( array( 'message' => $message ) ); }
+function esc_html( $value ) { return htmlspecialchars( (string) $value, ENT_QUOTES, 'UTF-8' ); }
+function esc_html_e( $value, $domain = '' ) { echo esc_html( $value ); }
+function esc_url( $value ) { return $value; }
+function esc_attr( $value ) { return esc_html( $value ); }
+function esc_js( $value ) { return $value; }
+function wp_kses_post( $value ) { return $value; }
+function admin_url( $path ) { return '/wp-admin/' . $path; }
+function wp_nonce_field( $action ) {}
+function submit_button( $text, $type = '', $name = '', $wrap = true, $attrs = array() ) { echo '<button>' . $text . '</button>'; }
 
 /* ------------------------------------------------------------------ */
 /* Tiny assertion framework                                            */
@@ -802,6 +822,55 @@ tuc_assert(
 /* ================================================================== */
 /* Summary                                                            */
 /* ================================================================== */
+echo "\n[P1 D1] Multisite isolation\n";
+foreach ( array( false, true ) as $preview ) {
+	tuc_reset_stub_state();
+	tuc_install_settings();
+	$GLOBALS['_stub']['multisite'] = true;
+	$repo = new TUC_Fake_Repo();
+	$svc = new Tutor_User_Cleanup_Cleanup_Service( $repo );
+	$summary = $svc->wipe_user( 42, 'reset_learner', $preview );
+	tuc_assert_eq( 'blocked', $summary['result'], 'multisite site reset/preview is blocked' );
+	tuc_assert_eq( 0, array_sum( $repo->calls ), 'blocked multisite reset makes no repository mutations' );
+	tuc_assert_eq( 0, array_sum( $summary['counts'] ), 'blocked preview advertises no planned deletions' );
+	tuc_assert_eq( array(), $summary['operations'], 'blocked preview has no executable operations' );
+	tuc_assert( false !== strpos( $summary['message'], 'network-shared' ), 'block explains global Tutor metadata' );
+}
+tuc_reset_stub_state();
+tuc_install_settings();
+$GLOBALS['_stub']['multisite'] = true;
+$GLOBALS['_stub']['valid_uids'] = array( 42 );
+$GLOBALS['_stub']['user_blogs'] = array( 2, 3 );
+$_REQUEST['_wpnonce'] = 'abc';
+$_REQUEST['tutor_user_cleanup'] = '1';
+$repo = new TUC_Fake_Repo();
+$svc = new Tutor_User_Cleanup_Cleanup_Service( $repo );
+$blocked = $svc->handle_user_deletion( 42 );
+tuc_assert_eq( 'blocked', $blocked['result'], 'site account-removal hook cannot wipe network data' );
+$results = $svc->handle_network_user_deletion( 42 );
+tuc_assert_eq( array( 2, 3 ), array_keys( $results ), 'explicit network account deletion still visits both sites' );
+tuc_assert_eq( 4, $repo->calls['del_enroll'], 'explicit network deletion retains whole-account cleanup' );
+tuc_assert_eq( 1, get_current_blog_id(), 'network deletion restores site after cleanup' );
+
+$_POST['users'] = '42';
+try {
+	( new Tutor_User_Cleanup_Admin_UI( $svc ) )->ajax_preview();
+} catch ( TUC_Test_Response $response ) {
+	tuc_assert_eq( false, $response->payload['success'], 'multisite AJAX preview returns a visible error, not empty-data success' );
+	tuc_assert( false !== strpos( $response->payload['data']['message'] ?? '', 'network-shared' ), 'AJAX explains multisite isolation block' );
+}
+$_GET['user'] = 42;
+$_GET['_wpnonce'] = 'abc';
+try {
+	ob_start();
+	( new Tutor_User_Cleanup_Reset_Learner( $svc ) )->render_confirm_screen();
+	ob_end_clean();
+	tuc_assert( false, 'multisite reset screen must stop before confirmation form' );
+} catch ( TUC_Test_Response $response ) {
+	ob_end_clean();
+	tuc_assert( false !== strpos( $response->payload['message'] ?? '', 'network-shared' ), 'reset screen explains multisite block' );
+}
+
 echo "\n--------------------------------------------------\n";
 printf( "Ran %d assertions, %d failed.\n", $GLOBALS['tuc_tests'], $GLOBALS['tuc_failed'] );
 echo "--------------------------------------------------\n";

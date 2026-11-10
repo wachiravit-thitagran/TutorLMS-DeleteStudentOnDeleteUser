@@ -44,6 +44,11 @@ class Tutor_User_Cleanup_Cleanup_Service {
 			: new Tutor_User_Cleanup_Tutor_Data_Repository();
 	}
 
+	/** Explain the fail-closed multisite boundary consistently in every UI. */
+	public static function multisite_block_message() {
+		return __( 'Site-local Tutor cleanup is unavailable on multisite because Tutor progress uses network-shared user metadata. No cleanup is planned or performed. Whole-account cleanup is available only through explicit network user deletion.', 'tutor-user-cleanup' );
+	}
+
 	/*
 	|----------------------------------------------------------------------
 	| Request validation
@@ -146,7 +151,9 @@ class Tutor_User_Cleanup_Cleanup_Service {
 		// The surrounding WordPress account deletion is always live and cannot be
 		// stopped from the delete_user hook. Running only a preview here would delete
 		// the account while leaving Tutor custom-table rows orphaned.
-		return $this->wipe_user( $user_id, 'delete_user', false );
+		$context = in_array( $nonce_action, array( 'ms-users-delete', 'deleteuser' ), true )
+			? 'network_delete_user' : 'delete_user';
+		return $this->wipe_user( $user_id, $context, false );
 	}
 
 	/**
@@ -182,12 +189,31 @@ class Tutor_User_Cleanup_Cleanup_Service {
 	 * Run (or preview) the wipe pipeline for one user.
 	 *
 	 * @param int    $user_id User ID.
-	 * @param string $context 'delete_user' | 'reset_learner'.
+	 * @param string $context 'delete_user' | 'network_delete_user' | 'reset_learner'.
 	 * @param bool   $dry_run When true, only count — do not delete.
 	 * @return array{result:string,dry_run:bool,counts:array<string,int>,operations:array<string,array<string,mixed>>,user_id:int,message:string}
 	 */
 	public function wipe_user( $user_id, $context, $dry_run = false ) {
 		$user_id = absint( $user_id );
+
+		// Tutor stores lesson IDs and aggregate progress in network-shared usermeta
+		// without a blog namespace. Even a course-scoped helper cannot distinguish
+		// equal IDs on two sites. Refuse site-local operations before hooks or reads;
+		// only the explicit, capability/nonce-checked network account deletion may
+		// perform the existing whole-account cleanup. Preview must report this same
+		// block rather than advertise deletions that cannot safely be executed.
+		if ( is_multisite() && ( 'network_delete_user' !== $context || ! current_user_can( 'manage_network_users' ) ) ) {
+			$blocked = array(
+				'result'     => 'blocked',
+				'dry_run'    => (bool) $dry_run,
+				'counts'     => $this->empty_counts(),
+				'operations' => array(),
+				'user_id'    => $user_id,
+				'message'    => self::multisite_block_message(),
+			);
+			Tutor_User_Cleanup_Logger::log( array_merge( $blocked, array( 'target_user_id' => $user_id, 'context' => $context ) ) );
+			return $blocked;
+		}
 
 		// Dedupe within this request.
 		$processed_key = get_current_blog_id() . ':' . $user_id;
@@ -307,9 +333,8 @@ class Tutor_User_Cleanup_Cleanup_Service {
 				$messages[]                       = 'lesson_completions: ' . $e->getMessage();
 			}
 
-			// Run Tutor's helper after the direct core sweeps. The helper still
-			// fires add-on cleanup hooks, while requested/deleted counts above are
-			// not distorted by the helper having already removed the same rows.
+			// Run only the narrow course-completion operation. Broad Tutor
+			// progress helpers also delete disabled quiz/add-on categories.
 			try {
 				$course_ids = $this->repo->get_enrolled_course_ids( $user_id );
 				$counts['courses_reset'] = count( $course_ids );

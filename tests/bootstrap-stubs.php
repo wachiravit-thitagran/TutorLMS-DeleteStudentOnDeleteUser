@@ -315,3 +315,7 @@ function tuc_reset_stub_state() {
 	$_POST    = array();
 	$_GET     = array();
 }
+
+function is_multisite() {
+	return ! empty( $GLOBALS['_stub']['multisite'] );
+}

@@ -192,6 +192,10 @@ class Tutor_User_Cleanup_Reset_Learner {
 		if ( is_wp_error( $targets ) ) {
 			wp_die( esc_html( $targets->get_error_message() ) );
 		}
+		if ( is_multisite() ) {
+			wp_die( esc_html( Tutor_User_Cleanup_Cleanup_Service::multisite_block_message() ) );
+			return;
+		}
 
 		$repo           = new Tutor_User_Cleanup_Tutor_Data_Repository();
 		$version_status = $repo->get_version_support_status();
