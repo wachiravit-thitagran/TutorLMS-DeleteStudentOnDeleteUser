@@ -12,6 +12,7 @@ A WordPress plugin that adds an **opt-in option to the "Delete Users" screen** t
 - **Dry-run preview** shows exactly how many records will be removed before you commit.
 - Logs requested, deleted and failed counts for every operation under **Tools → Tutor User Cleanup**.
 - On network deletion, processes every site the user belongs to; extensible via the `tutor_user_cleanup_after_user` hook.
+- Multisite site-local resets, site-removal cleanup and their previews are blocked: Tutor lesson progress and reading metadata are shared across the network without a site namespace. The confirmation screen and preview explain this limitation. Explicit network account deletion retains whole-account cleanup, subject to the existing version and request guards. Network deletion preview is unavailable; it must not be confused with a site-local reset preview.
 
 ## What it removes vs. preserves
 

@@ -83,7 +83,8 @@
 				users: String( users )
 			} ).done( function ( resp ) {
 				if ( ! resp || ! resp.success ) {
-					$out.html( '<p class="tutor-user-cleanup-warning">' + ( cfg.i18n.error || 'Error' ) + '</p>' );
+					var message = resp && resp.data && resp.data.message;
+					$out.html( '<p class="tutor-user-cleanup-warning">' + escapeHtml( message || cfg.i18n.error || 'Error' ) + '</p>' );
 					return;
 				}
 				$out.html( renderCounts( resp.data.counts || {} ) );

@@ -228,6 +228,10 @@ class Tutor_User_Cleanup_Admin_UI {
 		if ( ! current_user_can( 'delete_users' ) && ! current_user_can( 'manage_network_users' ) ) {
 			wp_send_json_error( array( 'message' => __( 'Permission denied.', 'tutor-user-cleanup' ) ), 403 );
 		}
+		if ( is_multisite() ) {
+			wp_send_json_error( array( 'message' => Tutor_User_Cleanup_Cleanup_Service::multisite_block_message() ) );
+			return;
+		}
 
 		$raw      = isset( $_POST['users'] ) ? sanitize_text_field( wp_unslash( $_POST['users'] ) ) : '';
 		$user_ids = array_filter( array_map( 'absint', explode( ',', $raw ) ) );

@@ -220,20 +220,26 @@ class Tutor_User_Cleanup_Tutor_Data_Repository {
 	*/
 
 	/**
-	 * Use Tutor's own high-level reset for a course: wipes quiz attempts for the
-	 * course, the course_completed comment, lesson-completion meta and fires
-	 * `delete_tutor_course_progress` so Pro add-ons (e.g. Assignments) clean up.
+	 * Reset only this course completion. Lesson metadata is handled by the
+	 * explicit lesson sweep. Never delegate to Tutor's broad reset: it also
+	 * deletes quiz attempts and invokes unrelated assignment/add-on hooks.
 	 *
 	 * @param int $course_id Course ID.
-	 * @param int $user_id   User ID.
-	 * @return bool True if the helper was available and invoked.
+	 * @param int $user_id User ID.
+	 * @return bool Whether the narrowly scoped database operation succeeded.
 	 */
 	public function reset_course_progress( $course_id, $user_id ) {
-		if ( function_exists( 'tutor_utils' ) && method_exists( tutor_utils(), 'delete_course_progress' ) ) {
-			tutor_utils()->delete_course_progress( absint( $course_id ), absint( $user_id ) );
-			return true;
-		}
-		return false;
+		global $wpdb;
+		return false !== $wpdb->delete(
+			$wpdb->comments,
+			array(
+				'user_id' => absint( $user_id ),
+				'comment_post_ID' => absint( $course_id ),
+				'comment_type' => 'course_completed',
+				'comment_agent' => 'TutorLMSPlugin',
+			),
+			array( '%d', '%d', '%s', '%s' )
+		);
 	}
 
 	/**
@@ -262,7 +268,15 @@ class Tutor_User_Cleanup_Tutor_Data_Repository {
 	 */
 	public function delete_course_completions( $user_id ) {
 		global $wpdb;
-		return $wpdb->delete(
+		$comment_ids = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT comment_ID FROM {$wpdb->comments} WHERE user_id = %d AND comment_type = %s AND comment_agent = %s",
+				absint( $user_id ),
+				'course_completed',
+				'TutorLMSPlugin'
+			)
+		);
+		$removed = $wpdb->delete(
 			$wpdb->comments,
 			array(
 				'user_id'       => absint( $user_id ),
@@ -271,6 +285,10 @@ class Tutor_User_Cleanup_Tutor_Data_Repository {
 			),
 			array( '%d', '%s', '%s' )
 		);
+		if ( false !== $removed && ! empty( $comment_ids ) ) {
+			clean_comment_cache( array_map( 'intval', $comment_ids ) );
+		}
+		return $removed;
 	}
 
 	/**
@@ -307,6 +325,10 @@ class Tutor_User_Cleanup_Tutor_Data_Repository {
 				$wpdb->esc_like( '_tutor_completed_lesson_id_' ) . '%'
 			)
 		);
+
+		// Raw SQL bypasses WordPress metadata invalidation, including when the
+		// aggregate key is absent and delete_user_meta() would be a no-op.
+		wp_cache_delete( $user_id, 'user_meta' );
 
 		// Also drop the aggregate reading-info meta.
 		delete_user_meta( $user_id, '_lesson_reading_info' );
